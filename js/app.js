@@ -92,9 +92,12 @@
     loadVoices();
     speechSynthesis.onvoiceschanged = loadVoices;
   }
-  function speak(text, rate = 1) {
-    if (!('speechSynthesis' in window)) return;
-    speechSynthesis.cancel();
+  // iOS Safari only allows speech that starts inside a tap, and drops an utterance
+  // queued right after cancel(). So we unlock speech on the first tap, and only
+  // cancel (then wait briefly) when something is actually playing.
+  let speechUnlocked = false, speakTimer = null;
+  function enqueue(text, rate) {
+    speechSynthesis.resume(); // Safari/Chrome can get stuck in a paused state
     // Long texts are split into chunks; some browsers cut off long utterances.
     const chunks = text.split(/\n+|(?<=[.!?])\s+/).filter((s) => s.trim());
     for (const chunk of chunks) {
@@ -105,6 +108,32 @@
       speechSynthesis.speak(u);
     }
   }
+  function speak(text, rate = 1) {
+    if (!('speechSynthesis' in window)) return;
+    // Auto-play (e.g. a new flashcard) doesn't count: iOS ignores it outside a tap
+    if (!navigator.userActivation || navigator.userActivation.isActive) speechUnlocked = true;
+    clearTimeout(speakTimer);
+    if (speechSynthesis.speaking || speechSynthesis.pending) {
+      speechSynthesis.cancel();
+      speakTimer = setTimeout(() => enqueue(text, rate), 120);
+    } else {
+      enqueue(text, rate);
+    }
+  }
+  function stopSpeaking() {
+    if (!('speechSynthesis' in window)) return;
+    clearTimeout(speakTimer);
+    speechSynthesis.cancel();
+  }
+  function unlockSpeech() {
+    if (speechUnlocked || !('speechSynthesis' in window)) return;
+    speechUnlocked = true;
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0;
+    speechSynthesis.speak(u);
+  }
+  // Bubble phase on document: runs after any button that already called speak()
+  ['touchend', 'click', 'keydown'].forEach((ev) => document.addEventListener(ev, unlockSpeech));
   const speakBtn = (text, label = '🔊') => `<button class="speak" data-say="${esc(text)}" title="Ouvir" aria-label="Ouvir">${label}</button>`;
   app.addEventListener('click', (e) => {
     const b = e.target.closest('[data-say]');
@@ -140,7 +169,7 @@
   let cleanup = null;
   function route() {
     if (cleanup) { cleanup(); cleanup = null; }
-    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    stopSpeaking();
     const [section = '', id] = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
     const view = routes[section] || viewHome;
     $$('#nav a', document).forEach((a) => a.classList.toggle('active', a.dataset.route === (routes[section] ? section : '')));
@@ -409,7 +438,8 @@
       const tenses = s.drillTenses.length ? s.drillTenses : ['pres'];
       const pool = V.VERBS.filter((v) => s.drillVerbs === 'all' || (s.drillVerbs === 'irregular' ? v.irregular : !v.irregular));
       const verb = pick(pool);
-      const tense = V.TENSES.find((t) => t.id === pick(tenses));
+      const tenseId = pick(tenses);
+      const tense = V.TENSES.find((t) => t.id === tenseId);
       const p = Math.floor(Math.random() * 4);
       current = { verb, tense, p, answer: V.conjugate(verb)[tense.id][p] };
       answered = false;
@@ -626,7 +656,7 @@
 
     $('#play').onclick = () => speak(r.text, 1);
     $('#play-slow').onclick = () => speak(r.text, 0.75);
-    $('#stop').onclick = () => speechSynthesis.cancel();
+    $('#stop').onclick = stopSpeaking;
     $$('.gloss').forEach((g) => (g.onclick = () => {
       const on = g.classList.contains('show');
       $$('.gloss.show').forEach((x) => x.classList.remove('show'));
